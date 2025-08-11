@@ -1,0 +1,96 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from fairlearn.metrics import MetricFrame, true_positive_rate, false_positive_rate, false_negative_rate, selection_rate
+import numpy as np
+
+# Load German Credit dataset
+url = 'https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data'
+columns = [
+    'checking_account', 'duration', 'credit_history', 'purpose', 'credit_amount',
+    'savings_account', 'employment', 'installment_rate', 'personal_status', 'other_debtors',
+    'residence_since', 'property', 'age', 'other_installment_plans', 'housing',
+    'number_credits', 'job', 'people_liable', 'telephone', 'foreign_worker', 'credit_risk'
+]
+df = pd.read_csv(url, sep=' ', header=None, names=columns)
+
+# Map target to binary
+df['credit_risk'] = df['credit_risk'].map({1:0, 2:1})
+
+# Extract sex from personal_status
+def get_sex(ps):
+    if ps in ['A91', 'A93', 'A95']:
+        return 'Male'
+    else:
+        return 'Female'
+df['sex'] = df['personal_status'].apply(get_sex)
+
+# Select numeric & categorical features
+numeric_cols = ['duration', 'credit_amount', 'installment_rate', 'residence_since', 'age', 'number_credits', 'people_liable']
+categorical_cols = [
+    'checking_account', 'credit_history', 'purpose', 'savings_account', 'employment',
+    'other_debtors', 'property', 'other_installment_plans', 'housing', 'job',
+    'telephone', 'foreign_worker'
+]
+
+# One-hot encode categorical
+df_cat = pd.get_dummies(df[categorical_cols], drop_first=True)
+
+# Combine numeric and categorical features
+X = pd.concat([df[numeric_cols], df_cat], axis=1)
+y = df['credit_risk']
+sex = df['sex']
+
+# Scale numeric features for better convergence
+scaler = StandardScaler()
+X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
+
+# Function to train and evaluate model fairness
+def train_and_eval(X, y, sensitive, max_iter=5000):
+    X_train, X_test, y_train, y_test, sens_train, sens_test = train_test_split(
+        X, y, sensitive, test_size=0.3, stratify=sensitive, random_state=42
+    )
+    clf = LogisticRegression(max_iter=max_iter)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    metric_frame = MetricFrame(
+        metrics={
+            'TPR': true_positive_rate,
+            'FPR': false_positive_rate,
+            'FNR': false_negative_rate,
+            'Selection Rate': selection_rate
+        },
+        y_true=y_test,
+        y_pred=y_pred,
+        sensitive_features=sens_test
+    )
+    print("Fairness metrics by group:\n", metric_frame.by_group)
+    print()
+    return metric_frame.by_group
+
+print("### Baseline: Original Data ###")
+baseline_metrics = train_and_eval(X, y, sex)
+
+# Simulate data quality impact:
+# Remove 20% of data from females randomly (simulate missingness)
+X_dq = X.copy()
+y_dq = y.copy()
+sex_dq = sex.copy()
+
+female_indices = sex_dq[sex_dq == 'Female'].index
+remove_n = int(0.2 * len(female_indices))
+np.random.seed(42)
+remove_indices = np.random.choice(female_indices, size=remove_n, replace=False)
+
+X_dq = X_dq.drop(remove_indices)
+y_dq = y_dq.drop(remove_indices)
+sex_dq = sex_dq.drop(remove_indices)
+
+print("### After Removing 20% Female Data (Simulated Data Quality Issue) ###")
+dq_metrics = train_and_eval(X_dq, y_dq, sex_dq)
+
+# Compare selection rate drop for females
+baseline_female_sr = baseline_metrics.loc['Female', 'Selection Rate']
+dq_female_sr = dq_metrics.loc['Female', 'Selection Rate']
+print(f"Selection Rate Female dropped from {baseline_female_sr:.3f} to {dq_female_sr:.3f} due to data removal")
