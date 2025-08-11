@@ -1,0 +1,105 @@
+# Install fairlearn if not installed
+!pip install fairlearn
+
+# Upload dataset
+from google.colab import files
+uploaded = files.upload()  # Upload your adult.csv file here
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from fairlearn.metrics import MetricFrame, selection_rate, demographic_parity_difference, equalized_odds_difference
+from fairlearn.reductions import ExponentiatedGradient, DemographicParity
+import matplotlib.pyplot as plt
+
+# Load dataset with column names
+columns = [
+    'age', 'workclass', 'fnlwgt', 'education', 'education-num',
+    'marital-status', 'occupation', 'relationship', 'race', 'sex',
+    'capital-gain', 'capital-loss', 'hours-per-week', 'native-country', 'income'
+]
+df = pd.read_csv("adult.csv", header=None, names=columns, na_values=' ?')
+df = df.dropna()
+
+# Keep relevant columns and create binary target
+df = df[['age', 'education-num', 'hours-per-week', 'sex', 'income']]
+df['income_binary'] = df['income'].str.strip().eq('>50K').astype(int)
+
+# Prepare features and target
+X = df[['age', 'education-num', 'hours-per-week']].copy()
+X['sex_Male'] = df['sex'].str.strip().eq('Male').astype(int)
+y = df['income_binary']
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+sf_train = df.loc[X_train.index, 'sex']
+sf_test = df.loc[X_test.index, 'sex']
+
+# --- Baseline (Unfair) Model ---
+model = LogisticRegression(max_iter=1000)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+
+print("=== Baseline Model ===")
+print("Accuracy:", accuracy_score(y_test, y_pred))
+
+metric_frame_baseline = MetricFrame(
+    metrics={
+        "Selection Rate": selection_rate,
+        "Accuracy": accuracy_score
+    },
+    y_true=y_test,
+    y_pred=y_pred,
+    sensitive_features=sf_test
+)
+print("\nMetrics by gender:")
+print(metric_frame_baseline.by_group)
+
+dp_diff_baseline = demographic_parity_difference(y_test, y_pred, sensitive_features=sf_test)
+eo_diff_baseline = equalized_odds_difference(y_test, y_pred, sensitive_features=sf_test)
+
+print(f"\nDemographic Parity Difference (baseline): {dp_diff_baseline:.4f}")
+print(f"Equalized Odds Difference (baseline): {eo_diff_baseline:.4f}")
+
+# --- Fairlearn Mitigation ---
+mitigator = ExponentiatedGradient(
+    LogisticRegression(max_iter=1000),
+    constraints=DemographicParity()
+)
+mitigator.fit(X_train, y_train, sensitive_features=sf_train)
+y_pred_fair = mitigator.predict(X_test)
+
+print("\n=== Mitigated (Fair) Model ===")
+print("Accuracy:", accuracy_score(y_test, y_pred_fair))
+
+metric_frame_fair = MetricFrame(
+    metrics={
+        "Selection Rate": selection_rate,
+        "Accuracy": accuracy_score
+    },
+    y_true=y_test,
+    y_pred=y_pred_fair,
+    sensitive_features=sf_test
+)
+print("\nMetrics by gender:")
+print(metric_frame_fair.by_group)
+
+dp_diff_fair = demographic_parity_difference(y_test, y_pred_fair, sensitive_features=sf_test)
+eo_diff_fair = equalized_odds_difference(y_test, y_pred_fair, sensitive_features=sf_test)
+
+print(f"\nDemographic Parity Difference (fair): {dp_diff_fair:.4f}")
+print(f"Equalized Odds Difference (fair): {eo_diff_fair:.4f}")
+
+# --- Plot comparison of Selection Rates ---
+df_plot = pd.DataFrame({
+    'Baseline': metric_frame_baseline.by_group['Selection Rate'],
+    'Fair': metric_frame_fair.by_group['Selection Rate']
+})
+
+ax = df_plot.plot(kind='bar', rot=0, title='Selection Rate by Gender: Baseline vs Fair')
+ax.set_ylabel('Selection Rate')
+plt.tight_layout()
+plt.show()
